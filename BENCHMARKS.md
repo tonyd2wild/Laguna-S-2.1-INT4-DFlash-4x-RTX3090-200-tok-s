@@ -15,13 +15,17 @@ fp8 KV active in ALL rows (checkpoint kv_cache_scheme auto-activates it; see REA
 | graphs .88 k7 @80K (SPEED) | 70.5 | 244.9 | 113.2 | ~3.2 | — |
 | + explicit fp8 flag (no-op) | 110.2 | 249.0 | 146.4 | — | — |
 | no spec, FULL graphs, @80K | 86.2 | 88.4 | 90.2 | n/a | n/a |
-| **seqs 4, batch 2K, gmu .87 @176K** | **263.1**† | — | — | — | — |
+| seqs 4, batch 2K, gmu .87 @176K | 263.1† | — | — | — | — |
+| **seqs 4, batch 2K, gmu .87 @200K** | **282.5**‡ | — | — | — | — |
 
 *mixed-content chat runs (temp 0.7, 512 tok) — everything else is code prompts.
 HTML generation on SPEED build: 108.9 cold, ~200 user-reported warm.
 
 †500-token HTML prompt, 1.901 s client-wall. The 176K build also passed a fresh
 160,043-token prompt plus 27 generated tokens in 59.45 s.
+
+‡500-token HTML chat generation, 1.770 s client-wall. The 200K build passed a fresh
+190,002-token prompt plus 32 generated tokens in 73.623 s.
 
 ## KV pools (engine `GPU KV cache size`)
 
@@ -35,7 +39,8 @@ HTML generation on SPEED build: 108.9 cold, ~200 user-reported warm.
 | computed: profiler-reserve reclaimed | 80K+ | ~234,900 | — |
 | graphs .88 k7, seqs 4 | 128K | 193,917 | 1.48x |
 | graphs .88 k7, seqs 4 (prefill OOM) | 192K | 198,273 | 1.01x |
-| **graphs .87 k7, seqs 4, batch 2K** | **176K** | **212,112** | **1.18x** |
+| graphs .87 k7, seqs 4, batch 2K | 176K | 212,112 | 1.18x |
+| **graphs .87 k7, seqs 4, batch 2K** | **200K** | **212,822** | **1.04x** |
 
 ## Failure catalog (equally load-bearing)
 
@@ -74,7 +79,8 @@ matching max-model-len.
 |---|---:|---:|---|---|
 | DFlash k7, seqs 4, batch 4K, gmu .88 | 128K | 193,917 (1.48x) | 300-token generation passed; graph estimate 0.43 GiB | seqs 8→4 recovers 0.31 GiB |
 | DFlash k7, seqs 4, batch 4K, gmu .88 | 192K | 198,273 (1.01x) | short generation passed; fresh ~180K prompt OOMed | boot pool is not sufficient validation |
-| **DFlash k7, seqs 4, batch 2K, gmu .87** | **176K** | **212,112 (1.18x)** | **160,043 prompt + 27 output passed; HTML 263.1 tok/s** | **new champion** |
+| DFlash k7, seqs 4, batch 2K, gmu .87 | 176K | 212,112 (1.18x) | 160,043 prompt + 27 output passed; HTML 263.1 tok/s | stable stepping stone |
+| **DFlash k7, seqs 4, batch 2K, gmu .87** | **200K** | **212,822 (1.04x)** | **190,002 prompt + 32 output passed; HTML 282.5 tok/s** | **new champion** |
 
 The 196K failure was a real CUDA OOM in `moe_wna16_marlin_gemm` / `aten::new_empty`:
 24 MiB requested with 2-14 MiB physically free, despite ~444 MiB reserved but unusable.

@@ -25,7 +25,7 @@ on this box (client-wall tok/s, 400-token code gens unless noted).
 | round-2 champion | DFlash k7, graphs, seqs 8, gmu .88 | 128K | 160,335 | 150-260 | superseded by seqs 4 + 2K chunks |
 | seqs-4 probe | DFlash k7, graphs, seqs 4, gmu .88, batch 4K | 128K | 193,917 | generation-gated | graph reserve 0.74→0.43 GiB |
 | 196K edge | DFlash k7, graphs, seqs 4, gmu .88, batch 4K | 192K | 198,273 | **CRASH @ 180K prefill** | KV admitted it; Marlin workspace OOM |
-| **CHAMPION** | DFlash k7, graphs, **seqs 4**, **batch 2K**, **gmu .87** | **176K** | **212,112** | **263.1** | 160,043-token prompt + generation passed |
+| **CHAMPION** | DFlash k7, graphs, **seqs 4**, **batch 2K**, **gmu .87** | **200K** | **212,822** | **282.5** | 190,002-token prompt + generation passed |
 
 ## The 425K mystery (solved, with credit to @hampsonw)
 
@@ -40,14 +40,14 @@ what pushed the DFlash build to 128K. Good exchange.
 ## Current champion: speed + context together
 
 ```text
---max-model-len 180224 --gpu-memory-utilization 0.87 \
+--max-model-len 204800 --gpu-memory-utilization 0.87 \
 --max-num-seqs 4 --max-num-batched-tokens 2048 \
 --speculative-config '{"model":"/root/.cache/huggingface/Laguna-S-2.1-DFlash-INT4","num_speculative_tokens":7,"method":"dflash"}'
 ```
 
-Measured boot: **212,112-token KV pool (1.18x)**. Measured HTML decode: **500 tokens in
-1.901 s = 263.1 tok/s** client-wall. Long-context gate: a **160,043-token prompt** plus
-27 generated tokens completed in 59.45 s. This is the new balanced lever: 48K more context
+Measured boot: **212,822-token KV pool (1.04x)**. Measured HTML chat decode: **500 tokens in
+1.770 s = 282.5 tok/s** client-wall. Long-context gate: a **190,002-token prompt** plus
+32 generated tokens completed in 73.623 s. This is the new balanced lever: 72K more context
 than round 2 while retaining the DFlash speed path.
 
 ## The four big discoveries (each one killed a wrong theory)
@@ -66,7 +66,8 @@ than round 2 while retaining the DFlash speed path.
 4. **KV admission is not the final long-context gate.** A 196K build booted with a 198,273
    pool and passed a short generation, then a fresh ~180K prompt OOMed in Marlin's MoE
    `aten::new_empty` workspace with only 2-14 MiB free. Reducing prefill chunks 4096→2048
-   and gmu .88→.87 made 176K stable while increasing the measured pool to 212,112.
+   and gmu .88→.87 made 176K stable. With the same runtime margin, the final 200K build
+   booted with a 212,822-token pool and passed a fresh 190,002-token generation gate.
 
 The first 4-bit KV probe, `int4_per_token_head`, failed during engine initialization on
 Laguna's cache shape. The next probe is vLLM's mixed `turboquant_k8v4` mode (8-bit K,
