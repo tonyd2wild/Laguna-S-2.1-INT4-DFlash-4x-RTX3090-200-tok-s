@@ -18,7 +18,21 @@ on this box (client-wall tok/s, 400-token code gens unless noted).
 | graphs | +CUDA graphs, gmu .88, k7 | 32K | 85,775 | 85-158 | PIECEWISE (spec forces it) |
 | **SPEED (current)** | graphs, gmu .88, k7 | **80K** | 98,827 | **113-245** (HTML ~200 warm) | the daily driver |
 | context (no spec) | drop DFlash, FULL graphs | 80K | 142,220 | 86-90 | matches community 86 t/s |
-| **MAX (pending gates)** | + `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0` | ~224K | **~234,900 (computed)** | expect 113-245 | the everything-config |
+| reclaim @ 0.88 (greedy) | estimate-off env | 80K | 231,943 | **CRASH** | illegal access at 1st gen |
+| reclaim @ 0.85 | estimate-off env | 80K | 157,945 | **CRASH** | OOM at graph capture |
+| big-ctx mode | no DFlash, FULL graphs, gmu .90 | 128K | 224,858 | 87-89 | measured, works |
+| Will-reference | his exact flags (no ctx cap, seqs 8, defaults→gmu .92) | 256K | **390,566** | 88.9 | reproduces his 425K claim |
+| **CHAMPION (serving)** | DFlash k7, graphs, **seqs 8**, gmu .88 | **128K** | **160,335** | **150-260** | the everything-config, real |
+
+## The 425K mystery (solved, with credit to @hampsonw)
+
+A community post showed "425,799 tokens at bf16" on the same model/hardware class. Panic
+ensued. Resolution, measured: (1) the printed pool **scales with max-model-len** in hybrid
+models (sliding layers amortize over the denominator) — his 256K default vs our capped
+runs; (2) his lean workspace (`--max-num-seqs 8`, defaults) frees ~1 GiB vs our config;
+(3) "at bf16" was a mislabel — this checkpoint bakes fp8 KV in (see below). His exact flags
+on our box: 390,566 @ 256K. No magic, no missing memory — and his `max-num-seqs` tip is
+what pushed the DFlash build to 128K. Good exchange.
 
 ## The three big discoveries (each one killed a wrong theory)
 
