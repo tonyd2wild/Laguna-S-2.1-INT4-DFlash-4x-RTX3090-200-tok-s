@@ -46,6 +46,7 @@ HTML generation on SPEED build: 108.9 cold, ~200 user-reported warm.
 | k15 | 60% of draft work wasted | per-position acceptance dies after ~5 |
 | `--kv-cache-dtype fp8` | byte-identical pool | fp8 already on (checkpoint scheme) |
 | 196K, seqs 4, batch 4K, gmu .88 | fresh ~180K prompt → engine death | KV admission passed, but Marlin MoE workspace needed 24 MiB with only 2-14 MiB free |
+| `int4_per_token_head`, 256K, seqs 4 | engine initialization failed | Laguna cache shape rejected: `shape '[64, 2, 16, 2, 68]' is invalid for input of size 540672` |
 
 ## Reference points
 - Community (X, 2026-07-21): 86 t/s c1 base no-spec, pool "425,799 at bf16", power-capped
@@ -78,3 +79,7 @@ matching max-model-len.
 The 196K failure was a real CUDA OOM in `moe_wna16_marlin_gemm` / `aten::new_empty`:
 24 MiB requested with 2-14 MiB physically free, despite ~444 MiB reserved but unusable.
 The stable build adds explicit runtime margin and halves the largest prefill chunk.
+
+Next KV experiment: `--kv-cache-dtype turboquant_k8v4`, following Will's note that
+the key and value caches do not need the same precision (8-bit K / 4-bit V). This is
+an experiment target, not a validated configuration.

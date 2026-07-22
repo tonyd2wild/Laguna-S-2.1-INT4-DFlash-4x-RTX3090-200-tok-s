@@ -68,6 +68,11 @@ than round 2 while retaining the DFlash speed path.
    `aten::new_empty` workspace with only 2-14 MiB free. Reducing prefill chunks 4096→2048
    and gmu .88→.87 made 176K stable while increasing the measured pool to 212,112.
 
+The first 4-bit KV probe, `int4_per_token_head`, failed during engine initialization on
+Laguna's cache shape. The next probe is vLLM's mixed `turboquant_k8v4` mode (8-bit K,
+4-bit V), suggested by Will. It remains explicitly unvalidated until it boots and passes
+a fresh long-prompt generation gate.
+
 ## Where the memory actually goes (per 24 GB card)
 
 Weights are 17.53 GiB per worker including the draft. With DFlash, FULL_AND_PIECEWISE is
