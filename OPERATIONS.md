@@ -4,7 +4,7 @@
 
 | Item | Value |
 |---|---|
-| API base | `http://100.113.64.18:8080/v1` |
+| API base | `http://<your-host>:8080/v1` |
 | Network | Tailscale/private network |
 | Served model | `laguna` |
 | Container | `vllm-laguna` |
@@ -21,7 +21,7 @@ authenticated proxy.
 ```bash
 ./launch.sh --status
 
-curl -s http://100.113.64.18:8080/v1/models | python3 -m json.tool
+curl -s http://<your-host>:8080/v1/models | python3 -m json.tool
 
 docker logs vllm-laguna 2>&1 | \
   grep -E 'GPU KV cache size|Maximum concurrency|ERROR|Traceback' | tail -20
@@ -31,7 +31,7 @@ A healthy model-list response is necessary but insufficient. Always run a short 
 a restart or configuration change:
 
 ```bash
-./scripts/smoke-test.sh http://100.113.64.18:8080/v1
+./scripts/smoke-test.sh http://<your-host>:8080/v1
 ```
 
 ## Start, logs, status, stop
@@ -72,7 +72,7 @@ remove the exact Laguna container, and relaunch the champion. See [TROUBLESHOOTI
 
 ## Host-specific cautions
 
-- `/home/tony/vllm-watchdog.sh` is stale and points at an old Qwen configuration. Do not start it.
+- Audit the host for stale watchdog/restart scripts from previous deployments before trusting uptime — a leftover script that `pkill`s vllm or boots an old model config will sabotage this serve.
 - The host's wired link is approximately 100 Mbps. Reuse the verified local checkpoints instead
   of downloading them again.
 - The four cards form two NVLink pairs with PCIe between pairs. Keep
@@ -82,8 +82,8 @@ remove the exact Laguna container, and relaunch the champion. See [TROUBLESHOOTI
 ## Current checkpoint paths on Tony's host
 
 ```text
-/home/tony/club-3090/models-cache/Laguna-S-2.1-INT4
-/home/tony/club-3090/models-cache/Laguna-S-2.1-DFlash-INT4
+<MODEL_CACHE>/Laguna-S-2.1-INT4
+<MODEL_CACHE>/Laguna-S-2.1-DFlash-INT4
 ```
 
 They are mounted into the container at `/root/.cache/huggingface`.
