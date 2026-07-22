@@ -1,91 +1,93 @@
-# Measured benchmarks — Laguna-S-2.1-INT4 + DFlash, 4x RTX 3090, vLLM v0.25.1
+# Benchmarks
 
-All decode numbers are client-side wall clock (curl → usage.completion_tokens / elapsed),
-400-token code generations at temp 0.3 unless noted. KV pools from engine boot logs.
-fp8 KV active in ALL rows (checkpoint kv_cache_scheme auto-activates it; see README #3).
+All numbers in this file were measured on the same four-RTX-3090 host with
+`vllm/vllm-openai:v0.25.1`. Projected results are excluded.
 
-## Decode ladder (chronological)
+## Current serving result
 
-| config | run 1 | run 2 | run 3 | accept len | draft accept |
-|---|---|---|---|---|---|
-| eager .85 k15 @32K | 22.8* | 22.9* | 25.7* | 3.32 | 15.4% |
-| (same, code prompt) | 37.5 | — | — | 3.32 | 15.4% |
-| eager .85 k7 @32K | 39.8 | 43.2 | 45.8 | 3.13 | 30.4% |
-| graphs .88 k7 @32K | 85.3 | 157.6 | 147.7 | 3.18 | — |
-| graphs .88 k7 @80K (SPEED) | 70.5 | 244.9 | 113.2 | ~3.2 | — |
-| + explicit fp8 flag (no-op) | 110.2 | 249.0 | 146.4 | — | — |
-| no spec, FULL graphs, @80K | 86.2 | 88.4 | 90.2 | n/a | n/a |
-| seqs 4, batch 2K, gmu .87 @176K | 263.1† | — | — | — | — |
-| **seqs 4, batch 2K, gmu .87 @200K** | **282.5**‡ | — | — | — | — |
+| Metric | Result | Method |
+|---|---:|---|
+| Max model length | **204,800** | `/v1/models` and engine configuration |
+| FP8 KV pool | **212,822 tokens** | vLLM boot log |
+| Maximum full-length concurrency | **1.04×** | vLLM boot log |
+| Available KV memory | **1.88 GiB/GPU** | vLLM profiler log |
+| Model + draft allocation | **17.53 GiB/GPU** | vLLM model-load log |
+| Long-context validation | **190,002 prompt + 32 output** | Fresh completion request |
+| Long-context wall time | **73.623 s** | Client wall clock |
+| HTML chat generation | **282.5 tok/s** | 500 output tokens / 1.770 s client wall |
 
-*mixed-content chat runs (temp 0.7, 512 tok) — everything else is code prompts.
-HTML generation on SPEED build: 108.9 cold, ~200 user-reported warm.
+## Champion progression
 
-†500-token HTML prompt, 1.901 s client-wall. The 176K build also passed a fresh
-160,043-token prompt plus 27 generated tokens in 59.45 s.
+| Round | DFlash config | Context | KV pool | Measured decode | Long gate |
+|---|---|---:|---:|---:|---|
+| Initial speed | k7, graphs, seqs 16, batch 4K, gmu .88 | 80K | 98,827 | 113–245 tok/s | Short generation |
+| Round 2 | k7, graphs, seqs 8, batch 4K, gmu .88 | 128K | 160,335 | 149.9–259.7 tok/s | Generation passed |
+| Round 3A | k7, graphs, seqs 4, batch 2K, gmu .87 | 176K | 212,112 | 263.1 tok/s | 160,043 + 27 passed |
+| **Round 3B** | **k7, graphs, seqs 4, batch 2K, gmu .87** | **200K** | **212,822** | **282.5 tok/s** | **190,002 + 32 passed** |
 
-‡500-token HTML chat generation, 1.770 s client-wall. The 200K build passed a fresh
-190,002-token prompt plus 32 generated tokens in 73.623 s.
+Decode measurements use client-wall time and `usage.completion_tokens`. They are
+workload-sensitive because DFlash acceptance varies with content. The 176K and 200K speed
+rows are 500-token HTML generations; the earlier rows include code and HTML prompts.
 
-## KV pools (engine `GPU KV cache size`)
+## Context-first references
 
-| config | ctx | pool tokens | concurrency |
-|---|---|---|---|
-| eager .85 (any k) | 32K | 143,126 | 4.37x |
-| graphs .88 k7 | 32K | 85,775 | 2.62x |
-| graphs .88 k7 | 80K | 98,827 | 1.21x |
-| graphs .88 no-spec | 80K | 142,220 | 1.74x |
-| Kai's eager .90 k15 (crashed on gen) | 100K | 294,183 | 2.87x |
-| computed: profiler-reserve reclaimed | 80K+ | ~234,900 | — |
-| graphs .88 k7, seqs 4 | 128K | 193,917 | 1.48x |
-| graphs .88 k7, seqs 4 (prefill OOM) | 192K | 198,273 | 1.01x |
-| graphs .87 k7, seqs 4, batch 2K | 176K | 212,112 | 1.18x |
-| **graphs .87 k7, seqs 4, batch 2K** | **200K** | **212,822** | **1.04x** |
+| Configuration | Context | KV pool | Decode | Purpose |
+|---|---:|---:|---:|---|
+| No spec, FULL graphs, gmu .90 | 128K | 224,858 | 87–89 tok/s | Stable non-DFlash alternative |
+| Will-reference: no spec, seqs 8, image defaults | 256K | 390,566 | 88.9 tok/s | Reproduced the community's large-pool result |
 
-## Failure catalog (equally load-bearing)
+The Will-reference result resolved the “425K KV pool” mystery. The community configuration
+used the model's 256K default context, no DFlash, lower sequence concurrency, and checkpoint-
+selected FP8 KV. On this host the equivalent command produced 390,566 pool tokens; version and
+default differences explain the remaining gap to the reported 425,799.
 
-| attempt | failure | root cause |
-|---|---|---|
-| gmu 0.90 eager + DFlash | first generation → engine death | 394 MB draft buffer vs ~100 MB free |
-| graphs @ gmu 0.85 | boot: 0.25 GiB KV < 0.36 needed | graph profiler reserve inside gmu |
-| k15 | 60% of draft work wasted | per-position acceptance dies after ~5 |
-| `--kv-cache-dtype fp8` | byte-identical pool | fp8 already on (checkpoint scheme) |
-| 196K, seqs 4, batch 4K, gmu .88 | fresh ~180K prompt → engine death | KV admission passed, but Marlin MoE workspace needed 24 MiB with only 2-14 MiB free |
-| `int4_per_token_head`, 256K, seqs 4 | engine initialization failed | Laguna cache shape rejected: `shape '[64, 2, 16, 2, 68]' is invalid for input of size 540672` |
+## Validation gates
 
-## Reference points
-- Community (X, 2026-07-21): 86 t/s c1 base no-spec, pool "425,799 at bf16", power-capped
-  cards. Our no-spec run matches the 86. The pool gap is memory budget, not allocator magic.
-- vLLM upstream DFlash+fp8 validation (4090/Ada): accept len 8.23, GSM8K 0.844.
-
-## Round 2 (2026-07-22, after @hampsonw shared his flags)
-
-| config | ctx | pool | speed | notes |
+| Candidate | Boot | Short generation | Fresh long prompt | Verdict |
 |---|---|---|---|---|
-| reclaim env @ .88 + DFlash | 80K | 231,943 | CRASH | illegal memory access, 1st gen |
-| reclaim env @ .85 + DFlash | 80K | 157,945 | CRASH | OOM at graph capture — the profiler reserve is load-bearing |
-| big-ctx (no spec, FULL graphs, .90) | 128K | 224,858 | 87.3 / 89.2 | flat, content-independent |
-| Will-exact (no ctx cap, seqs 8, image defaults gmu .92) | 256K | 390,566 (1.49x) | 88.9 | reproduces the 425K post ± version noise |
-| **DFlash k7 + graphs + seqs 8 @ .88** | **128K** | **160,335 (1.22x)** | **149.9 / 259.7** | **champion** — max-num-seqs 16→8 freed the workspace |
+| 128K, seqs 4, batch 4K, gmu .88 | Pass | 300-token output pass | Not required | Workspace probe passed |
+| 192K, seqs 4, batch 4K, gmu .88 | Pass, pool 198,273 | Pass | ~180K prompt OOM | Rejected |
+| 176K, seqs 4, batch 2K, gmu .87 | Pass, pool 212,112 | Pass | 160,043 + 27 pass | Stable |
+| **200K, seqs 4, batch 2K, gmu .87** | **Pass, pool 212,822** | **Pass** | **190,002 + 32 pass** | **Serving** |
 
-Pool-formula insight (verified in v0.25.1 source): printed pool = f(memory, max-model-len);
-sliding layers charge ~289 blocks/request regardless of ctx, so bigger max-model-len prints
-bigger pools from the same GiB. Cross-config pool comparisons are meaningless without
-matching max-model-len.
+## Failure catalog
 
-## Round 3 (2026-07-22, workspace + long-prompt gates)
+| Attempt | Failure | Root cause / lesson |
+|---|---|---|
+| DFlash k15, eager, gmu .90 | Engine died on first generation | DFlash allocated an additional ~394 MB runtime buffer without sufficient margin |
+| CUDA graphs, gmu .85 | Boot rejected the KV allocation | Graph reservation left only ~0.25 GiB KV versus ~0.36 GiB required |
+| Disable CUDA-graph estimate, gmu .88 | Illegal memory access on first generation | The apparent reclaimed memory was not safe runtime capacity |
+| Disable CUDA-graph estimate, gmu .85 | OOM during graph capture | The profiler reserve is load-bearing |
+| 192K, batch 4K, gmu .88 | ~180K prefill killed engine | Marlin MoE requested 24 MiB with only 2–14 MiB physically free |
+| `int4_per_token_head`, 256K | Engine initialization failed | Laguna cache layout produced an invalid reshape (`[64,2,16,2,68]`) |
 
-| config | ctx | pool | measured result | verdict |
-|---|---:|---:|---|---|
-| DFlash k7, seqs 4, batch 4K, gmu .88 | 128K | 193,917 (1.48x) | 300-token generation passed; graph estimate 0.43 GiB | seqs 8→4 recovers 0.31 GiB |
-| DFlash k7, seqs 4, batch 4K, gmu .88 | 192K | 198,273 (1.01x) | short generation passed; fresh ~180K prompt OOMed | boot pool is not sufficient validation |
-| DFlash k7, seqs 4, batch 2K, gmu .87 | 176K | 212,112 (1.18x) | 160,043 prompt + 27 output passed; HTML 263.1 tok/s | stable stepping stone |
-| **DFlash k7, seqs 4, batch 2K, gmu .87** | **200K** | **212,822 (1.04x)** | **190,002 prompt + 32 output passed; HTML 282.5 tok/s** | **new champion** |
+## Reproducing measurements
 
-The 196K failure was a real CUDA OOM in `moe_wna16_marlin_gemm` / `aten::new_empty`:
-24 MiB requested with 2-14 MiB physically free, despite ~444 MiB reserved but unusable.
-The stable build adds explicit runtime margin and halves the largest prefill chunk.
+```bash
+# Short health + generation gate
+./scripts/smoke-test.sh http://localhost:8080/v1
 
-Next KV experiment: `--kv-cache-dtype turboquant_k8v4`, following Will's note that
-the key and value caches do not need the same precision (8-bit K / 4-bit V). This is
-an experiment target, not a validated configuration.
+# Three 500-token client-wall HTML chat runs
+python3 scripts/benchmark.py \
+  --base-url http://localhost:8080/v1 \
+  --max-tokens 500 --repeats 3
+
+# Destructive-to-latency near-limit gate; run on an otherwise idle endpoint
+python3 scripts/long-context-gate.py \
+  --base-url http://localhost:8080/v1 \
+  --prompt-tokens 190000 --max-output-tokens 32
+```
+
+Before quoting a single-stream result, confirm the endpoint is otherwise idle. Report the
+prompt, output token count, temperature, concurrency, client-wall time, and whether the run
+was cold or warm.
+
+## KV-pool interpretation
+
+Laguna has 12 full-attention and 36 sliding-window layers. vLLM's hybrid KV manager charges
+sliding layers by the window-bounded block count and full layers by configured context. The
+printed pool therefore changes with `max-model-len` even when KV bytes barely change.
+
+**Never compare pool-token numbers across different context limits without also comparing
+the exact engine configuration and KV memory.** See [EXPERIMENTS.md](EXPERIMENTS.md) for the
+allocator investigation and formula.

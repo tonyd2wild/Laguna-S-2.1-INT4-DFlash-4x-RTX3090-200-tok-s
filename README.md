@@ -1,108 +1,120 @@
-# Laguna-S-2.1 INT4 + DFlash on 4x RTX 3090 — a levers menu (private, WIP)
+# Laguna S 2.1 INT4 + DFlash at 200K on 4× RTX 3090
 
-poolside **Laguna-S-2.1-INT4** (~8B-active WNA16 MoE, 15 shards ~77 GB, native 256K ctx,
-hybrid attention: **12 full + 36 sliding(w=512) layers**) with the **DFlash-INT4** speculator,
-on a quad-RTX-3090 box (24 GB each, NVLink pairs 0↔1 NV2 / 2↔3 NV1, PCIe between pairs, TP4),
-vLLM v0.25.1.
+Reproducible vLLM recipe for serving Poolside's 117.6B-total / 8.5B-active
+[`Laguna-S-2.1-INT4`](https://huggingface.co/poolside/Laguna-S-2.1-INT4) with the
+precision-matched DFlash drafter on four 24 GB RTX 3090s.
 
-This repo is a **menu of measured configs** — pick your lever. Every number below was measured
-on this box (client-wall tok/s, 400-token code gens unless noted).
+The current balanced configuration reaches **200K context and up to 282.5 output tok/s**
+on the same endpoint. It was validated with a fresh **190,002-token prompt plus generation**;
+it is not a boot-only claim.
 
-## The levers table (all measured 2026-07-22)
+## Result
 
-| build | flags delta | ctx | KV pool | decode tok/s | notes |
-|---|---|---|---|---|---|
-| baseline (Kai handoff) | eager, gmu .90, k15 | 100K | 294K | **0 — crashed on 1st gen** | DFlash 394 MB buffer OOM |
-| first serve | eager, gmu .85, k15 | 32K | 143,126 | 37.5 | accept 3.32, draft accept 15% |
-| k7 | eager, gmu .85, k7 | 32K | 143,126 | 39.8-45.8 | accept 3.13, draft accept 30% |
-| graphs | +CUDA graphs, gmu .88, k7 | 32K | 85,775 | 85-158 | PIECEWISE (spec forces it) |
-| former SPEED | graphs, gmu .88, k7 | 80K | 98,827 | 113-245 (HTML ~200 warm) | superseded |
-| context (no spec) | drop DFlash, FULL graphs | 80K | 142,220 | 86-90 | matches community 86 t/s |
-| reclaim @ 0.88 (greedy) | estimate-off env | 80K | 231,943 | **CRASH** | illegal access at 1st gen |
-| reclaim @ 0.85 | estimate-off env | 80K | 157,945 | **CRASH** | OOM at graph capture |
-| big-ctx mode | no DFlash, FULL graphs, gmu .90 | 128K | 224,858 | 87-89 | measured, works |
-| Will-reference | his exact flags (no ctx cap, seqs 8, defaults→gmu .92) | 256K | **390,566** | 88.9 | reproduces his 425K claim |
-| round-2 champion | DFlash k7, graphs, seqs 8, gmu .88 | 128K | 160,335 | 150-260 | superseded by seqs 4 + 2K chunks |
-| seqs-4 probe | DFlash k7, graphs, seqs 4, gmu .88, batch 4K | 128K | 193,917 | generation-gated | graph reserve 0.74→0.43 GiB |
-| 196K edge | DFlash k7, graphs, seqs 4, gmu .88, batch 4K | 192K | 198,273 | **CRASH @ 180K prefill** | KV admitted it; Marlin workspace OOM |
-| **CHAMPION** | DFlash k7, graphs, **seqs 4**, **batch 2K**, **gmu .87** | **200K** | **212,822** | **282.5** | 190,002-token prompt + generation passed |
+| Item | Validated value |
+|---|---:|
+| Hardware | 4× NVIDIA RTX 3090 24 GB |
+| Runtime | vLLM `v0.25.1`, Docker |
+| Tensor parallelism | TP4 |
+| Max model length | **204,800 tokens (200K)** |
+| FP8 KV pool | **212,822 tokens (1.04×)** |
+| Long-context gate | **190,002 input + 32 output tokens passed** |
+| Long-context wall time | **73.623 s** |
+| HTML chat decode | **500 tokens in 1.770 s = 282.5 tok/s** |
+| Served model name | `laguna` |
 
-## The 425K mystery (solved, with credit to @hampsonw)
+## Quick start
 
-A community post showed "425,799 tokens at bf16" on the same model/hardware class. Panic
-ensued. Resolution, measured: (1) the printed pool **scales with max-model-len** in hybrid
-models (sliding layers amortize over the denominator) — his 256K default vs our capped
-runs; (2) his lean workspace (`--max-num-seqs 8`, defaults) frees ~1 GiB vs our config;
-(3) "at bf16" was a mislabel — this checkpoint bakes fp8 KV in (see below). His exact flags
-on our box: 390,566 @ 256K. No magic, no missing memory — and his `max-num-seqs` tip is
-what pushed the DFlash build to 128K. Good exchange.
+Prerequisites are Docker, NVIDIA Container Toolkit, four visible 24 GB GPUs, approximately
+85 GB of model storage, and the two Poolside checkpoints:
 
-## Current champion: speed + context together
+```bash
+hf download poolside/Laguna-S-2.1-INT4 \
+  --local-dir /models/Laguna-S-2.1-INT4
 
-```text
---max-model-len 204800 --gpu-memory-utilization 0.87 \
---max-num-seqs 4 --max-num-batched-tokens 2048 \
---speculative-config '{"model":"/root/.cache/huggingface/Laguna-S-2.1-DFlash-INT4","num_speculative_tokens":7,"method":"dflash"}'
+hf download poolside/Laguna-S-2.1-DFlash-INT4 \
+  --local-dir /models/Laguna-S-2.1-DFlash-INT4
+
+docker pull vllm/vllm-openai:v0.25.1
 ```
 
-Measured boot: **212,822-token KV pool (1.04x)**. Measured HTML chat decode: **500 tokens in
-1.770 s = 282.5 tok/s** client-wall. Long-context gate: a **190,002-token prompt** plus
-32 generated tokens completed in 73.623 s. This is the new balanced lever: 72K more context
-than round 2 while retaining the DFlash speed path.
+Launch the measured configuration:
 
-## The four big discoveries (each one killed a wrong theory)
+```bash
+MODEL_CACHE=/models ./launch.sh --dry-run
+MODEL_CACHE=/models ./launch.sh
+./scripts/smoke-test.sh http://localhost:8080/v1
+```
 
-1. **DFlash's OOM was never "context too big."** The draft allocates a ~394 MB runtime buffer
-   at FIRST REQUEST. gmu 0.90 leaves ~100 MB free → serves fine, dies on generation. Ceiling
-   with DFlash ≈ gmu 0.88.
-2. **k=15 is a trap on this stack.** Acceptance collapses after position ~5; k=7 doubled draft
-   efficiency at identical accepted length (+22% decode).
-3. **fp8 KV is ALWAYS ON — there is no fp8 lever.** The INT4 checkpoint ships a calibrated
-   `kv_cache_scheme` (8-bit float, tensor) that vLLM auto-activates under `--kv-cache-dtype auto`,
-   for target AND draft. Proven integer-exactly: the 98,827-token pool only fits fp8 page math
-   (a bf16 pool would need 2.03 GiB; only 0.96 GiB was available). Passing `--kv-cache-dtype fp8`
-   is a no-op; passing `bfloat16` would HALVE the pool. Two smart-sounding theories (draft-page
-   padding; engine-wide silent fp8 drop) both died against the allocator arithmetic.
-4. **KV admission is not the final long-context gate.** A 196K build booted with a 198,273
-   pool and passed a short generation, then a fresh ~180K prompt OOMed in Marlin's MoE
-   `aten::new_empty` workspace with only 2-14 MiB free. Reducing prefill chunks 4096→2048
-   and gmu .88→.87 made 176K stable. With the same runtime margin, the final 200K build
-   booted with a 212,822-token pool and passed a fresh 190,002-token generation gate.
+The server exposes an OpenAI-compatible API at `http://localhost:8080/v1` and serves the
+model as `laguna`. See [DEPLOYMENT.md](DEPLOYMENT.md) for host setup, the complete command,
+API examples, and validation steps.
 
-The first 4-bit KV probe, `int4_per_token_head`, failed during engine initialization on
-Laguna's cache shape. The next probe is vLLM's mixed `turboquant_k8v4` mode (8-bit K,
-4-bit V), suggested by Will. It remains explicitly unvalidated until it boots and passes
-a fresh long-prompt generation gate.
+## Why this configuration works
 
-## Where the memory actually goes (per 24 GB card)
+The final step was reducing serving concurrency and prefill workspace while retaining
+DFlash and CUDA graphs:
 
-Weights are 17.53 GiB per worker including the draft. With DFlash, FULL_AND_PIECEWISE is
-resolved to PIECEWISE. At seqs 8, the graph estimate was 0.74 GiB and available KV was
-1.49 GiB. At seqs 4, the graph estimate fell to 0.43 GiB (0.36 actual). The champion's
-2K prefill chunks plus gmu .87 leave **1.88 GiB available KV**. Do not disable the graph
-estimate: both estimate-off attempts crashed.
+| Lever | Final value | Effect |
+|---|---:|---|
+| `--max-num-seqs` | `4` | Reduced graph reservation from an estimated 0.74 GiB at seqs 8 to 0.43 GiB at seqs 4. |
+| `--max-num-batched-tokens` | `2048` | Reduced peak prefill workspace versus the failed 4096-token chunk configuration. |
+| `--gpu-memory-utilization` | `0.87` | Preserved runtime headroom for Marlin MoE and DFlash allocations. |
+| DFlash depth | `7` | Avoided the acceptance collapse seen beyond approximately five draft positions at k=15. |
+| KV dtype | checkpoint-selected FP8 | The INT4 checkpoint enables calibrated FP8 KV automatically; an explicit FP8 flag is a no-op. |
 
-## Why the pool ≠ simple math: hybrid accounting
+The previous 196K attempt booted and passed a short request, but a fresh ~180K prefill
+OOMed in Marlin workspace. That result established the repository's central validation rule:
+**a printed KV pool and a healthy `/v1/models` response do not prove long-context serving.**
 
-vLLM's hybrid KV manager charges sliding layers only ~289 blocks/request (window-bounded)
-vs 5,120 for full layers. The DFlash draft's 6 layers are deliberately full-context
-(`sliding_window = None` override — load-bearing: DFlash inserts verifier K/V at absolute
-slots; do NOT "fix" it). Never pass `--disable-hybrid-kv-cache-manager` (pool → ~41K).
+## Measured progression
 
-## Config landmines (from the bring-up, all cost real hours)
+| Serving build | Context | KV pool | Decode result | Outcome |
+|---|---:|---:|---:|---|
+| DFlash, seqs 16 | 80K | 98,827 | 113–245 tok/s | Original speed build |
+| DFlash, seqs 8 | 128K | 160,335 | 150–260 tok/s | Round-2 champion |
+| DFlash, seqs 4, 2K chunks | 176K | 212,112 | 263.1 tok/s | Stable stepping stone |
+| **DFlash, seqs 4, 2K chunks** | **200K** | **212,822** | **282.5 tok/s** | **Current champion** |
+| No DFlash, Will-reference | 256K | 390,566 | 88.9 tok/s | Context-first reference |
 
-1. Image entrypoint is `vllm serve` — model path only, no leading `serve`
-2. Set scheduling explicitly. The champion uses `--max-num-seqs 4` and
-   `--max-num-batched-tokens 2048`; larger values consume graph/prefill workspace.
-3. `--moe-backend marlin` (WNA16; official recipe's triton note is about DeepGEMM+DFlash)
-4. `--disable-custom-all-reduce` (PCIe cross-pair)
-5. A stale `/home/tony/vllm-watchdog.sh` on the box points at a different model and has
-   restarted the container once — disable it before trusting uptime
-6. Hand-carried weights: sha256 every shard vs HF's git-LFS oids (size checks pass on
-   corrupt shards; 5 shards were silently wrong once)
+These rows use different `max-model-len` values. Laguna's hybrid sliding/global attention
+accounting makes the printed pool depend on configured context, so pool-token counts must not
+be compared as if each token represented a fixed engine-wide byte cost. Full methodology and
+failed configurations are in [BENCHMARKS.md](BENCHMARKS.md) and [EXPERIMENTS.md](EXPERIMENTS.md).
 
-## Credits
-Kai (bring-up: the 4 config fixes, shard-integrity forensics) · poolside (Laguna + DFlash,
-calibrated fp8 KV scales in-checkpoint) · vLLM team ([official recipe](https://recipes.vllm.ai/poolside/Laguna-S-2.1),
-PRs #43081/#45181/#48787 — the DFlash+fp8 lineage) · **Will / @hampsonw** (86 t/s base,
-425,799-token pool datapoint, and the `max-num-seqs` lever that unlocked rounds 2-3).
+## Repository map
+
+| File | Purpose |
+|---|---|
+| [`launch.sh`](launch.sh) | Exact champion launcher with dry-run, status, logs, and stop commands |
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) | From-zero installation and API usage |
+| [`OPERATIONS.md`](OPERATIONS.md) | Live endpoint, health checks, safe operating procedure, and rollback |
+| [`BENCHMARKS.md`](BENCHMARKS.md) | Clean, measured result tables and methodology |
+| [`EXPERIMENTS.md`](EXPERIMENTS.md) | Full investigation timeline, discoveries, and dead ends |
+| [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Known failure signatures and recoveries |
+| [`NOTICE.md`](NOTICE.md) | Model/runtime provenance and third-party notice |
+| [`scripts/benchmark.py`](scripts/benchmark.py) | Reproducible client-wall chat benchmark |
+| [`scripts/long-context-gate.py`](scripts/long-context-gate.py) | Fresh near-limit prefill + generation gate |
+| [`scripts/smoke-test.sh`](scripts/smoke-test.sh) | API health and short generation check |
+
+## Important constraints
+
+- The champion is a **single-stream/low-concurrency balanced build**. `max-num-seqs=4` is a
+  memory lever, not a claim of high-throughput concurrency at 200K.
+- The server has no built-in API key in this recipe. Keep it behind Tailscale, a firewall,
+  or an authenticated reverse proxy.
+- Do not disable vLLM's CUDA-graph memory estimate. Both estimate-off tests crashed.
+- Do not raise DFlash builds to `gpu-memory-utilization >= 0.90`; the first-generation
+  DFlash runtime buffer has previously OOMed there.
+- `int4_per_token_head` KV failed to initialize for Laguna's cache shape. Mixed
+  `turboquant_k8v4` is a documented next experiment, not a validated serving mode.
+
+## Upstream references and credit
+
+- [Official vLLM Laguna S 2.1 recipe](https://recipes.vllm.ai/poolside/Laguna-S-2.1)
+- [Poolside Laguna S 2.1 INT4 model card](https://huggingface.co/poolside/Laguna-S-2.1-INT4)
+- [Poolside Laguna S 2.1 DFlash INT4](https://huggingface.co/poolside/Laguna-S-2.1-DFlash-INT4)
+
+Credit to Poolside for Laguna and the calibrated FP8 KV/DFlash checkpoints, the vLLM team
+for Laguna and DFlash support, Kai for the initial four-GPU bring-up and shard-integrity
+work, and **Will / [@hampsonw](https://x.com/hampsonw)** for the `max-num-seqs` lead and
+the mixed K8/V4 suggestion.
