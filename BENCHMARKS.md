@@ -15,9 +15,13 @@ fp8 KV active in ALL rows (checkpoint kv_cache_scheme auto-activates it; see REA
 | graphs .88 k7 @80K (SPEED) | 70.5 | 244.9 | 113.2 | ~3.2 | — |
 | + explicit fp8 flag (no-op) | 110.2 | 249.0 | 146.4 | — | — |
 | no spec, FULL graphs, @80K | 86.2 | 88.4 | 90.2 | n/a | n/a |
+| **seqs 4, batch 2K, gmu .87 @176K** | **263.1**† | — | — | — | — |
 
 *mixed-content chat runs (temp 0.7, 512 tok) — everything else is code prompts.
 HTML generation on SPEED build: 108.9 cold, ~200 user-reported warm.
+
+†500-token HTML prompt, 1.901 s client-wall. The 176K build also passed a fresh
+160,043-token prompt plus 27 generated tokens in 59.45 s.
 
 ## KV pools (engine `GPU KV cache size`)
 
@@ -29,6 +33,9 @@ HTML generation on SPEED build: 108.9 cold, ~200 user-reported warm.
 | graphs .88 no-spec | 80K | 142,220 | 1.74x |
 | Kai's eager .90 k15 (crashed on gen) | 100K | 294,183 | 2.87x |
 | computed: profiler-reserve reclaimed | 80K+ | ~234,900 | — |
+| graphs .88 k7, seqs 4 | 128K | 193,917 | 1.48x |
+| graphs .88 k7, seqs 4 (prefill OOM) | 192K | 198,273 | 1.01x |
+| **graphs .87 k7, seqs 4, batch 2K** | **176K** | **212,112** | **1.18x** |
 
 ## Failure catalog (equally load-bearing)
 
@@ -38,6 +45,7 @@ HTML generation on SPEED build: 108.9 cold, ~200 user-reported warm.
 | graphs @ gmu 0.85 | boot: 0.25 GiB KV < 0.36 needed | graph profiler reserve inside gmu |
 | k15 | 60% of draft work wasted | per-position acceptance dies after ~5 |
 | `--kv-cache-dtype fp8` | byte-identical pool | fp8 already on (checkpoint scheme) |
+| 196K, seqs 4, batch 4K, gmu .88 | fresh ~180K prompt → engine death | KV admission passed, but Marlin MoE workspace needed 24 MiB with only 2-14 MiB free |
 
 ## Reference points
 - Community (X, 2026-07-21): 86 t/s c1 base no-spec, pool "425,799 at bf16", power-capped
@@ -58,3 +66,15 @@ Pool-formula insight (verified in v0.25.1 source): printed pool = f(memory, max-
 sliding layers charge ~289 blocks/request regardless of ctx, so bigger max-model-len prints
 bigger pools from the same GiB. Cross-config pool comparisons are meaningless without
 matching max-model-len.
+
+## Round 3 (2026-07-22, workspace + long-prompt gates)
+
+| config | ctx | pool | measured result | verdict |
+|---|---:|---:|---|---|
+| DFlash k7, seqs 4, batch 4K, gmu .88 | 128K | 193,917 (1.48x) | 300-token generation passed; graph estimate 0.43 GiB | seqs 8→4 recovers 0.31 GiB |
+| DFlash k7, seqs 4, batch 4K, gmu .88 | 192K | 198,273 (1.01x) | short generation passed; fresh ~180K prompt OOMed | boot pool is not sufficient validation |
+| **DFlash k7, seqs 4, batch 2K, gmu .87** | **176K** | **212,112 (1.18x)** | **160,043 prompt + 27 output passed; HTML 263.1 tok/s** | **new champion** |
+
+The 196K failure was a real CUDA OOM in `moe_wna16_marlin_gemm` / `aten::new_empty`:
+24 MiB requested with 2-14 MiB physically free, despite ~444 MiB reserved but unusable.
+The stable build adds explicit runtime margin and halves the largest prefill chunk.
