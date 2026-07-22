@@ -10,17 +10,13 @@ it is not a boot-only claim.
 
 ## Result
 
-| Item | Validated value |
-|---|---:|
-| Hardware | 4× NVIDIA RTX 3090 24 GB |
-| Runtime | vLLM `v0.25.1`, Docker |
-| Tensor parallelism | TP4 |
-| Max model length | **204,800 tokens (200K)** |
-| FP8 KV pool | **212,822 tokens (1.04×)** |
-| Long-context gate | **190,002 input + 32 output tokens passed** |
-| Long-context wall time | **73.623 s** |
-| HTML chat decode | **500 tokens in 1.770 s = 282.5 tok/s** |
-| Served model name | `laguna` |
+| | |
+|---|---|
+| **Context** | **200K** (204,800 tokens), FP8 KV pool 212,822 |
+| **Decode** | **282.5 tok/s** measured (500 HTML tokens, temp 0) |
+| **Proof** | fresh 190,002-token prompt + generation passed — not a boot-only claim |
+| Hardware | 4× RTX 3090 24 GB, TP4, vLLM v0.25.1 |
+| Speculator | DFlash k=7 (precision-matched INT4 draft) |
 
 ## Quick start
 
@@ -66,20 +62,19 @@ The previous 196K attempt booted and passed a short request, but a fresh ~180K p
 OOMed in Marlin workspace. That result established the repository's central validation rule:
 **a printed KV pool and a healthy `/v1/models` response do not prove long-context serving.**
 
-## Measured progression
+## Pick your mode
 
-| Serving build | Context | KV pool | Decode result | Outcome |
-|---|---:|---:|---:|---|
-| DFlash, seqs 16 | 80K | 98,827 | 113–245 tok/s | Original speed build |
-| DFlash, seqs 8 | 128K | 160,335 | 150–260 tok/s | Round-2 champion |
-| DFlash, seqs 4, 2K chunks | 176K | 212,112 | 263.1 tok/s | Stable stepping stone |
-| **DFlash, seqs 4, 2K chunks** | **200K** | **212,822** | **282.5 tok/s** | **Current champion** |
-| No DFlash, Will-reference | 256K | 390,566 | 88.9 tok/s | Context-first reference |
+| Mode | Context | Decode | When to use it |
+|---|---:|---:|---|
+| **Champion** (this repo's launcher) | **200K** | **up to 282 tok/s** | Coding/agent duty — the default |
+| Context-first (no DFlash) | 256K | ~89 tok/s flat | Whole-repo dumps that need every token |
+| Prior speed build (rollback) | 128K | 150–260 tok/s | Fallback if the champion misbehaves |
 
-These rows use different `max-model-len` values. Laguna's hybrid sliding/global attention
-accounting makes the printed pool depend on configured context, so pool-token counts must not
-be compared as if each token represented a fixed engine-wide byte cost. Full methodology and
-failed configurations are in [BENCHMARKS.md](BENCHMARKS.md) and [EXPERIMENTS.md](EXPERIMENTS.md).
+One accounting warning before you compare numbers across configs (ours or anyone's):
+Laguna's hybrid sliding/global attention makes the **printed KV-pool figure scale with
+`max-model-len`** — pool counts from different context settings are not comparable.
+The full measured ladder (every build, every speed, every crash) is in
+[BENCHMARKS.md](BENCHMARKS.md); the investigation story is in [EXPERIMENTS.md](EXPERIMENTS.md).
 
 ## Repository map
 
